@@ -25,3 +25,4 @@ signal-hook = { version = "0.3.10", features = ["iterator"] }
 thiserror = "1.0.29"
 async-trait = "0.1.51"
 base64 = "0.13.0"
+reqwest = "0.11.4"

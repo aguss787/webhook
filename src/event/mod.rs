@@ -1,17 +1,20 @@
 use serde::Deserialize;
-use futures::FutureExt;
 use crate::event::utils::sync::{new_graceful_signal, GracefulSignal, combine};
+use thiserror::Error;
 
 mod trigger;
 mod utils;
 mod queue;
+mod sender;
 
 pub use utils::sync::GracefulSignalInvoker;
+use crate::event::trigger::SourceEvent;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Event {
     name: String,
     trigger: Vec<trigger::Trigger>,
+    target: Vec<sender::SenderConfig>,
 }
 
 pub fn load_events(dir: &String) -> Vec<Event> {
@@ -79,10 +82,9 @@ impl Pipeline {
     }
 
     async fn start_loop(event: Event, graceful_signal: GracefulSignal) {
-        let graceful_stop = graceful_signal.called().fuse();
+        let graceful_stop = graceful_signal.called();
         tokio::pin!(graceful_stop);
 
-        // todo: Config
         let (queue_sender, queue_receiver) = queue::new_queue(Some(0));
 
         let triggers = event.trigger.iter()
@@ -90,31 +92,36 @@ impl Pipeline {
             .map(|r| (r, queue_sender.clone()))
             .map(|(r, s)| {
                 tokio::spawn(async move {
-                    log::trace!("kroco tread id: {:?}", std::thread::current().id());
                     loop {
                         let event = r.get_one().await.expect("unable to retrieve event");
                         let s = s.clone();
-                        tokio::task::spawn_blocking(move || { s.send(event) }).await;
-                        tokio::task::yield_now().await;
+                        tokio::task::spawn(async move {
+                            s.send(event)
+                        }).await;
                     }
                 })
             })
             .collect::<Vec<_>>();
 
-        let sleep = tokio::time::sleep(std::time::Duration::from_secs(1));
-        tokio::pin!(sleep);
+        let senders = event.target.iter()
+            // todo: handle error
+            .map(|t| sender::new_sender(t).expect("unable to create sender"))
+            .collect::<Vec<_>>();
 
         loop {
             let queue_receiver = queue_receiver.clone();
-            let new_message = tokio::spawn(async move { queue_receiver.recv().await });
+            let new_message = tokio::task::spawn(async move {
+                queue_receiver.recv()
+            });
 
-            log::trace!("tread id: {:?}", std::thread::current().id());
             log::trace!("pipeline {} waiting for new message or stop signal", event.name);
             tokio::select! {
                 _ = &mut graceful_stop => { log::debug!("pipeline {} receive stop signal", event.name); break},
                 msg = new_message => {
                     let msg = msg.unwrap();
                     log::debug!("new message {:?}", String::from_utf8(msg.bytes().clone()));
+
+                    send_message(&senders, &msg).await;
                     msg.done().await
                 },
             };
@@ -123,4 +130,24 @@ impl Pipeline {
 
         log::info!("pipeline {} stopped", event.name);
     }
+}
+
+#[derive(Error, Debug)]
+enum Error {
+}
+
+type Result<T> = std::result::Result<T, Error>;
+
+async fn send_message(senders: &Vec<Box<dyn sender::Sender>>, msg: &Box<dyn SourceEvent>) -> Result<()> {
+    let ps = senders.iter()
+        .map(|s| {
+            s.send(sender::Payload{ content: msg.bytes().clone() })
+        });
+
+    let ps = futures::future::join_all(ps).await;
+    // todo: handle error
+    ps.iter().for_each(|p| {
+        p.as_ref().expect("failed to send message");
+    });
+    Ok(())
 }

@@ -14,9 +14,11 @@ pub struct GracefulSignal {
 impl GracefulSignal {
     pub async fn called(&self) {
         let r = self.r.clone();
-        if let Err(e) = r.recv() {
-            log::warn!("graceful signal is received with an channel error: {}", e);
-        }
+        tokio::spawn(async move {
+            if let Err(e) = r.recv() {
+                log::warn!("graceful signal is received with an channel error: {}", e);
+            }
+        }).await;
     }
 }
 

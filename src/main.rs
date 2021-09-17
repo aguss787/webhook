@@ -71,7 +71,7 @@ fn handle_signal(g: Box<dyn GracefulSignalInvoker>) {
     log::warn!("signal is not yet handled in windows");
 
     let (s, r) = crossbeam_channel::unbounded();
-    tokio::spawn(async move {
+    tokio::task::spawn_blocking(move || {
         r.recv().unwrap();
         s.send(()).unwrap();
         g.call();

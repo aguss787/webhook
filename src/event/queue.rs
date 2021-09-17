@@ -43,9 +43,10 @@ impl<T> Clone for QueuePuller<T> {
 }
 
 impl<T> QueuePuller<T> {
-    pub async fn recv(&self) -> T {
+    pub fn recv(&self) -> T {
         log::trace!("receiving an entry in the queue");
         // todo: error handling
+        // todo: closed queue
         self.r.recv().expect("unable to get message")
     }
 }
