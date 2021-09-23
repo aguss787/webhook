@@ -6,11 +6,19 @@ use serde::Deserialize;
 
 #[async_trait]
 pub trait Sender {
-    async fn send(&self, payload: Payload) -> Result<()>;
+    async fn send(&self, payload: Payload, state: &crate::event::process::State) -> Result<()>;
 }
 
+#[derive(Clone)]
 pub struct Payload {
     pub content: Vec<u8>
+}
+
+#[cfg(test)]
+impl Payload {
+    pub fn new() -> Self {
+        Payload{ content: vec!() }
+    }
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -31,4 +39,30 @@ pub fn new_sender(config: &SenderConfig) -> Result<Box<dyn Sender>> {
             SenderConfig::Http(c) => { Box::new(http::HttpSender::new(c)) }
         }
     )
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(untagged)]
+enum EnvString {
+    FromEnv { from_env: String },
+    String(String),
+}
+
+impl EnvString {
+    fn to_string(&self, state: &crate::event::process::State) -> Option<String> {
+        match self {
+            EnvString::FromEnv { from_env: key } => {
+                log::debug!("getting string from env with key: {}", key);
+                let val = state.get(key);
+                match val {
+                    Some(crate::event::process::Item::Value(crate::event::process::Value::StringValue(s))) => {
+                        log::debug!("string from env with key \"{}\" found: {}", key, s);
+                        Some(s.clone())
+                    },
+                    _ => None,
+                }
+            },
+            EnvString::String(s) => { Some(s.clone()) },
+        }
+    }
 }

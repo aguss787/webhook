@@ -13,8 +13,6 @@ struct Config {
 async fn main() {
     let config: Config = envy::from_env().expect("unable to load env");
 
-    println!("{:?}", config);
-
     let logger = env_logger::Builder::new()
         .filter_level(log::LevelFilter::Trace)
         .build();
@@ -58,7 +56,7 @@ fn handle_signal(g: Box<dyn GracefulSignalInvoker>) {
         signal_hook::consts::SIGTERM,
     ]).expect("unable to initialize signal handler");
 
-    tokio::spawn(async move {
+    tokio::task::spawn_blocking(move || {
         for _ in signals.forever() {
             g.call();
             break;

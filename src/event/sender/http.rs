@@ -15,7 +15,7 @@ enum HttpSenderType {
 
 #[derive(Deserialize, Clone, Debug)]
 struct HttpSenderUrlConfig {
-    url: String
+    url: super::EnvString
 }
 
 pub struct HttpSender {
@@ -34,16 +34,19 @@ impl HttpSender {
 
 #[async_trait]
 impl Sender for HttpSender {
-    async fn send(&self, payload: Payload) -> Result<()> {
+    async fn send(&self, payload: Payload, state: &crate::event::process::State) -> Result<()> {
         let ps = self.config.http.iter()
             .map(|s| {
                 match s {
                     HttpSenderType::Post { post } => {
-                        log::debug!("sending HTTP POST to {} with body {:?}", post.url, payload.content);
+                        // todo: handle missing url
+                        let url = post.url.to_string(state).unwrap_or(String::from("missing url"));
+
+                        log::debug!("sending HTTP POST to \"{}\" with body {:?}", url, payload.content);
 
                         // todo: handle error
                         let request = self.client
-                            .post(&post.url)
+                            .post(&url)
                             .body(payload.content.clone())
                             .build()
                             .expect("unable to build request");
@@ -56,7 +59,10 @@ impl Sender for HttpSender {
             .drain(0..)
             .for_each(|p| {
                 // todo: handle error
-                p.expect("http request failed");
+                let resp = p.expect("http request failed");
+                if !http::StatusCode::from(resp.status()).is_success() {
+                    log::error!("http call to {} failed with code {}", resp.url(), resp.status())
+                }
             });
 
         Ok(())

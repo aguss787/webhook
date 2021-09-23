@@ -1,19 +1,23 @@
 use serde::Deserialize;
-use crate::event::utils::sync::{new_graceful_signal, GracefulSignal, combine};
 use thiserror::Error;
+
+use process::operation;
+pub use utils::sync::GracefulSignalInvoker;
+
+use crate::event::trigger::SourceEvent;
+use crate::event::utils::sync::{combine, GracefulSignal, new_graceful_signal};
 
 mod trigger;
 mod utils;
 mod queue;
 mod sender;
-
-pub use utils::sync::GracefulSignalInvoker;
-use crate::event::trigger::SourceEvent;
+mod process;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Event {
     name: String,
     trigger: Vec<trigger::Trigger>,
+    process: Option<Vec<operation::Op>>,
     target: Vec<sender::SenderConfig>,
 }
 
@@ -23,7 +27,7 @@ pub fn load_events(dir: &String) -> Vec<Event> {
         .filter(|f| {
             match f {
                 Ok(_) => {}
-                Err(e) => {log::warn!("unable to read file/directory: {}", e)}
+                Err(e) => { log::warn!("unable to read file/directory: {}", e) }
             };
 
             f.is_ok()
@@ -41,12 +45,11 @@ pub fn load_events(dir: &String) -> Vec<Event> {
         .collect()
 }
 
-pub struct Executor {
-}
+pub struct Executor {}
 
 impl Executor {
     pub fn new() -> Self {
-        Executor{}
+        Executor {}
     }
 
     pub fn start(&self, mut events: Vec<Event>) -> (impl std::future::Future, Box<dyn GracefulSignalInvoker>) {
@@ -95,9 +98,13 @@ impl Pipeline {
                     loop {
                         let event = r.get_one().await.expect("unable to retrieve event");
                         let s = s.clone();
-                        tokio::task::spawn(async move {
+                        let res = tokio::task::spawn(async move {
                             s.send(event)
                         }).await;
+
+                        if let Err(e) = res {
+                            log::error!("event sender thread join error: {}", e);
+                        }
                     }
                 })
             })
@@ -107,6 +114,11 @@ impl Pipeline {
             // todo: handle error
             .map(|t| sender::new_sender(t).expect("unable to create sender"))
             .collect::<Vec<_>>();
+
+        let ops = match &event.process {
+            None => { vec!() }
+            Some(ops) => { ops.clone() }
+        };
 
         loop {
             let queue_receiver = queue_receiver.clone();
@@ -121,27 +133,47 @@ impl Pipeline {
                     let msg = msg.unwrap();
                     log::debug!("new message {:?}", String::from_utf8(msg.bytes().clone()));
 
-                    send_message(&senders, &msg).await;
-                    msg.done().await
+                    let res = dispatch_webhook(&event, &senders, &msg, &ops).await;
+                    if let Err(e) = res {
+                        log::error!("error dispatching webhook: {}", e)
+                    }
+                    msg.done().await;
                 },
-            };
+            }
+            ;
             log::trace!("pipeline {} done waiting for new message or stop signal", event.name);
         }
 
+        for trigger in triggers {
+            let res = trigger.await;
+            if let Err(e) = res {
+                log::error!("error joining trigger thread: {}", e);
+            }
+        }
         log::info!("pipeline {} stopped", event.name);
     }
 }
 
 #[derive(Error, Debug)]
-enum Error {
-}
+enum Error {}
 
 type Result<T> = std::result::Result<T, Error>;
 
-async fn send_message(senders: &Vec<Box<dyn sender::Sender>>, msg: &Box<dyn SourceEvent>) -> Result<()> {
+async fn dispatch_webhook(
+    event: &Event, senders: &Vec<Box<dyn sender::Sender>>,
+    msg: &Box<dyn SourceEvent>,
+    ops: &Vec<operation::Op>,
+) -> Result<()> {
+    let (payload, state) = ops.iter()
+        .fold((sender::Payload { content: msg.bytes().clone() }, process::State::new()), |(payload, state), op| {
+            let (payload, new_state) = op.execute(payload, state).expect("unhandled error on process execution");
+            log::trace!("pipeline \"{}\" new state: {:?}", event.name, new_state);
+            (payload, new_state)
+        });
+
     let ps = senders.iter()
         .map(|s| {
-            s.send(sender::Payload{ content: msg.bytes().clone() })
+            s.send(payload.clone(), &state)
         });
 
     let ps = futures::future::join_all(ps).await;

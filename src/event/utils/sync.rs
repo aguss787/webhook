@@ -14,11 +14,15 @@ pub struct GracefulSignal {
 impl GracefulSignal {
     pub async fn called(&self) {
         let r = self.r.clone();
-        tokio::spawn(async move {
+        let res = tokio::task::spawn_blocking(move || {
             if let Err(e) = r.recv() {
                 log::warn!("graceful signal is received with an channel error: {}", e);
             }
         }).await;
+
+        if let Err(e) = res {
+            log::error!("graceful signal thread join error: {}", e);
+        }
     }
 }
 
