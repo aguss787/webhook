@@ -3,6 +3,7 @@ mod http;
 use thiserror::Error;
 use async_trait::async_trait;
 use serde::Deserialize;
+use crate::event::process::Identifier;
 
 #[async_trait]
 pub trait Sender {
@@ -14,10 +15,9 @@ pub struct Payload {
     pub content: Vec<u8>
 }
 
-#[cfg(test)]
 impl Payload {
-    pub fn new() -> Self {
-        Payload{ content: vec!() }
+    pub fn new(content: Vec<u8>) -> Self {
+        Payload{ content }
     }
 }
 
@@ -44,7 +44,7 @@ pub fn new_sender(config: &SenderConfig) -> Result<Box<dyn Sender>> {
 #[derive(Deserialize, Clone, Debug)]
 #[serde(untagged)]
 enum EnvString {
-    FromEnv { from_env: String },
+    FromEnv { from_env: Identifier },
     String(String),
 }
 

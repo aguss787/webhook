@@ -155,9 +155,20 @@ impl Pipeline {
 }
 
 #[derive(Error, Debug)]
-enum Error {}
+enum Error {
+    #[error("error during process execution: {0}")]
+    ExecutionError(String)
+}
 
 type Result<T> = std::result::Result<T, Error>;
+
+impl From<process::Error> for Error {
+    fn from(e: process::Error) -> Self {
+        match e {
+            process::Error::NonMapAccess { .. } => { Error::ExecutionError(format!("{}", e)) }
+        }
+    }
+}
 
 async fn dispatch_webhook(
     event: &Event, senders: &Vec<Box<dyn sender::Sender>>,
@@ -165,11 +176,12 @@ async fn dispatch_webhook(
     ops: &Vec<operation::Op>,
 ) -> Result<()> {
     let (payload, state) = ops.iter()
-        .fold((sender::Payload { content: msg.bytes().clone() }, process::State::new()), |(payload, state), op| {
-            let (payload, new_state) = op.execute(payload, state).expect("unhandled error on process execution");
+        .fold(Ok((sender::Payload { content: msg.bytes().clone() }, process::State::new())), |r: Result<_>, op| {
+            let (payload, state) = r?;
+            let (payload, new_state) = op.execute(payload, state)?;
             log::trace!("pipeline \"{}\" new state: {:?}", event.name, new_state);
-            (payload, new_state)
-        });
+            Ok((payload, new_state))
+        })?;
 
     let ps = senders.iter()
         .map(|s| {

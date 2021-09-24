@@ -1,15 +1,16 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
-use crate::event::process::{Item, State, Value};
+use crate::event::process::{Identifier, Item, State, Value};
 use crate::event::process;
 use crate::event::sender::Payload;
-use std::fmt::Formatter;
-use std::collections::HashMap;
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum Op {
     SetEnv { set_env: SetEnv },
+    ToPayload { to_payload: ToPayload },
 }
 
 impl Op {
@@ -19,10 +20,16 @@ impl Op {
                 let (value, payload, mut new_state) = set_env.value.evaluate(payload, state)?;
                 let idx = set_env.target.clone();
                 log::debug!("setting env with key {} as {:?}", idx, value);
-                new_state.entry(idx.to_string())
-                    .and_modify(|i| { *i = value.clone(); })
-                    .or_insert(value.clone());
+                new_state.set(idx, value)?;
                 Ok((payload, new_state))
+            }
+            Op::ToPayload { to_payload } => {
+                let (item, _, state) = to_payload.value.evaluate(payload, state)?;
+
+                let item_bytes = to_payload.format.to_vec(&item)?;
+                let payload = Payload::new(item_bytes);
+
+                Ok((payload, state))
             }
         }
     }
@@ -32,19 +39,20 @@ impl Op {
 mod op_tests {
     use crate::event::process::*;
     use crate::event::process::operation::{Op, SetEnv};
+
     use super::*;
 
     #[test]
     fn test_set_env_ok() {
         let mut state = State::new();
-        state.insert(String::from("o"), Item::Value(Value::None));
+        let _ = state.set(Identifier::from("o"), Item::Value(Value::None));
 
-        let key = String::from("key");
+        let key = Identifier::from("key");
         let item = Item::Value(Value::IntValue(123));
         let value = Box::new(Expression::Item(item.clone()));
 
         let op = Op::SetEnv { set_env: SetEnv { target: key.clone().into(), value } };
-        let payload = crate::event::sender::Payload::new();
+        let payload = crate::event::sender::Payload::new(vec![]);
 
         let res = op.execute(payload, state);
         assert!(res.is_ok());
@@ -63,10 +71,9 @@ pub enum Expression {
     SetEnv { set_env: SetEnv },
     GetEnv { get_env: Identifier },
     FromJson { from_json: String },
-    FromPayload { from_payload: FromPayloadOp },
-    ToPayload { to_payload: Identifier },
+    FromPayload { from_payload: PayloadFormat },
     Item(Item),
-    AsMap { as_map: HashMap<String, Expression> }
+    AsMap { as_map: HashMap<String, Expression> },
 }
 
 impl Expression {
@@ -76,20 +83,20 @@ impl Expression {
                 let (value, payload, mut new_state) = set_env.value.evaluate(payload, state)?;
                 let idx = set_env.target.clone();
                 log::trace!("setting env with key {} as {:?}", idx, value);
-                new_state.entry(idx.to_string())
-                    .and_modify(|i| { *i = value.clone(); })
-                    .or_insert(value.clone());
+                new_state.set(idx, value.clone())?;
                 Ok((value, payload, new_state))
             }
             Expression::GetEnv { get_env } => {
-                let value = state.get(&get_env.to_string());
+                let value = state.get(&get_env);
                 let item = value
                     .and_then(|o| Some(o.clone()))
                     .unwrap_or(Item::Value(Value::None));
                 Ok((item, payload, state))
             }
-            Expression::FromPayload { .. } => { unimplemented!() }
-            Expression::ToPayload { .. } => { unimplemented!() }
+            Expression::FromPayload { from_payload: format } => {
+                let item = format.parse_payload(&payload)?;
+                Ok((item, payload, state))
+            }
             Expression::Item(i) => { Ok((i.clone(), payload, state)) }
             Expression::FromJson { .. } => { unimplemented!() }
             Expression::AsMap { .. } => { unimplemented!() }
@@ -102,19 +109,20 @@ impl Expression {
 mod expression_tests {
     use crate::event::process::*;
     use crate::event::process::operation::SetEnv;
+
     use super::*;
 
     #[test]
     fn test_set_env_ok() {
         let mut state = State::new();
-        state.insert(String::from("o"), Item::Value(Value::None));
+        let _ = state.set(Identifier::from("o"), Item::Value(Value::None));
 
-        let key = String::from("key");
+        let key = Identifier::from("key");
         let item = Item::Value(Value::IntValue(123));
         let value = Box::new(Expression::Item(item.clone()));
 
         let exp = Expression::SetEnv { set_env: SetEnv { target: key.clone().into(), value } };
-        let payload = crate::event::sender::Payload::new();
+        let payload = crate::event::sender::Payload::new(vec![]);
 
         let res = exp.evaluate(payload, state);
         assert!(res.is_ok());
@@ -131,13 +139,13 @@ mod expression_tests {
     #[test]
     fn test_get_env_ok() {
         let mut state = State::new();
-        let key = String::from("key");
+        let key = Identifier::from("key");
         let item = Item::Value(Value::IntValue(123));
 
-        state.insert(key.clone(), item.clone());
+        let _ = state.set(key.clone(), item.clone());
 
         let exp = Expression::GetEnv { get_env: key.clone().into() };
-        let payload = crate::event::sender::Payload::new();
+        let payload = crate::event::sender::Payload::new(vec![]);
 
         let res = exp.evaluate(payload, state);
         assert!(res.is_ok());
@@ -157,7 +165,7 @@ mod expression_tests {
 
         let item = Item::Value(Value::IntValue(123));
         let exp = Expression::Item(item.clone());
-        let payload = crate::event::sender::Payload::new();
+        let payload = crate::event::sender::Payload::new(vec![]);
 
         let res = exp.evaluate(payload, state);
         assert!(res.is_ok());
@@ -176,22 +184,42 @@ pub struct SetEnv {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-#[serde(untagged)]
-pub enum FromPayloadOp {
-    Json { json: Identifier },
+pub struct ToPayload {
+    format: PayloadFormat,
+    value: Box<Expression>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct Identifier(String);
+#[serde(rename_all = "lowercase")]
+pub enum PayloadFormat {
+    Yaml,
+    Json,
+}
 
-impl std::fmt::Display for Identifier {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+impl PayloadFormat {
+    pub fn to_vec(&self, i: &Item) -> super::Result<Vec<u8>> {
+        Ok(match self {
+            PayloadFormat::Yaml => { serde_yaml::to_vec(&i)? }
+            PayloadFormat::Json => { serde_json::to_vec(&i)? }
+        })
+    }
+
+    pub fn parse_payload(&self, payload: &Payload) -> super::Result<Item> {
+        Ok(match self {
+            PayloadFormat::Yaml => { serde_yaml::from_slice(payload.content.as_slice().clone())? }
+            PayloadFormat::Json => { serde_json::from_slice(payload.content.as_slice().clone())? }
+        })
     }
 }
 
-impl From<String> for Identifier {
-    fn from(s: String) -> Self {
-        Identifier(s)
+impl From<serde_json::Error> for super::Error {
+    fn from(_: serde_json::Error) -> Self {
+        unimplemented!()
+    }
+}
+
+impl From<serde_yaml::Error> for super::Error {
+    fn from(_: serde_yaml::Error) -> Self {
+        unimplemented!()
     }
 }
