@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::fmt::Formatter;
+use std::str::FromStr;
 
 use serde::{Serialize, Deserialize};
 use thiserror::Error;
+use std::num::ParseIntError;
 
 pub mod operation;
 
@@ -11,7 +13,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("unable to access field {field} from type {t}")]
-    NonMapAccess { field: String, t: String }
+    NonMapAccess { field: String, t: String },
+
+    #[error("index {index} out of bound in array with length {len}")]
+    IndexOutOfBound { index: usize, len: usize },
+
+    #[error("invalid index: {reason}")]
+    InvalidIndex { reason: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,17 +42,37 @@ impl State {
             Some(key) => {
                 let value = map.get(&key);
 
-                match path {
-                    None => { value }
-                    Some(recursive_key) => {
-                        value.and_then(|v| {
-                            match v {
-                                Item::Map(v) => { Self::get_from_map(v, &recursive_key) }
-                                _ => None
-                            }
-                        })
+                State::get_from_child(path, value)
+            }
+        }
+    }
+
+    fn get_from_vec<'a>(vec: &'a Vec<Item>, key: &Identifier) -> Option<&'a Item> {
+        let (key, path) = key.split();
+
+        match key {
+            None => { None }
+            Some(key) => {
+                let value = usize::from_str(key.as_str())
+                    .map(|idx| vec.get(idx))
+                    .unwrap_or(None);
+
+                State::get_from_child(path, value)
+            }
+        }
+    }
+
+    fn get_from_child(path: Option<Identifier>, value: Option<&Item>) -> Option<&Item> {
+        match path {
+            None => { value }
+            Some(recursive_key) => {
+                value.and_then(|v| {
+                    match v {
+                        Item::Map(v) => { Self::get_from_map(v, &recursive_key) }
+                        Item::Vec(v) => { Self::get_from_vec(v, &recursive_key) }
+                        _ => None
                     }
-                }
+                })
             }
         }
     }
@@ -79,7 +107,49 @@ impl State {
                             Item::Map(map) => {
                                 Self::set_map(map, recursive_key, value)
                             }
+                            Item::Vec(v) => {
+                                Self::set_vec(v, recursive_key, value)
+                            }
                             i => Err(Error::NonMapAccess { field: key, t: i.type_name().into() })
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn set_vec(vec: &mut Vec<Item>, key: Identifier, value: Item) -> Result<Option<Item>> {
+        let (key, path) = key.split();
+        log::trace!("setting internal state with key {:?} . {:?}, with value {:?}", key, path, value);
+
+        match key {
+            None => { Ok(None) }
+            Some(key) => {
+                match path {
+                    None => {
+                        let mut value = value;
+                        Ok(usize::from_str(key.as_str())
+                            .map(|idx| vec.get_mut(idx))?
+                            .map(|val| {
+                                std::mem::swap(val, &mut value);
+                                value
+                            }))
+                    }
+                    Some(recursive_key) => {
+                        let idx = usize::from_str(key.as_str());
+                        let rec = idx
+                            .clone()
+                            .map(|idx| vec.get_mut(idx))?;
+
+                        match rec {
+                            None => Err(Error::IndexOutOfBound { index: idx?, len: vec.len() }),
+                            Some(Item::Map(map)) => {
+                                Self::set_map(map, recursive_key, value)
+                            }
+                            Some(Item::Vec(v)) => {
+                                Self::set_vec(v, recursive_key, value)
+                            }
+                            Some(i) => Err(Error::NonMapAccess { field: key, t: i.type_name().into() })
                         }
                     }
                 }
@@ -170,6 +240,45 @@ mod state_tests {
             _ => unreachable!()
         };
         let item = map.get("other");
+        assert!(item.is_some());
+
+        let item = item.unwrap();
+        assert_eq!(item, &value);
+    }
+
+    #[test]
+    fn set_array_ok() {
+        let mut state = State::new();
+
+        let key: Identifier = "key".into();
+        let old_value = Item::Value(Value::IntValue(123));
+        let vec = Item::Vec(vec!(
+            old_value.clone(),
+        ));
+        let value = Item::Value(Value::StringValue("123".into()));
+
+        let returned_value = state.set(key.clone(), vec.clone());
+        assert!(returned_value.is_ok());
+
+        let returned_value = state.set("key.0".into(), value.clone());
+        assert!(returned_value.is_ok());
+        let returned_value = returned_value.unwrap();
+        assert!(returned_value.is_some());
+        assert_eq!(returned_value.unwrap(), old_value);
+
+        assert_eq!(state.0.len(), 1);
+
+        let item = state.0.get(&String::from("key"));
+        assert!(item.is_some());
+
+        let item = item.unwrap();
+        assert!(matches!(item, Item::Vec(_)));
+
+        let map = match item {
+            Item::Vec(map) => map,
+            _ => unreachable!()
+        };
+        let item = map.get(0);
         assert!(item.is_some());
 
         let item = item.unwrap();
@@ -283,13 +392,50 @@ mod state_tests {
             &Item::Map(map)
         })
     }
+
+    #[test]
+    fn get_array_element_ok() {
+        let mut state = State::new();
+
+        let key: Identifier = "key.1".into();
+        let target = Item::Value(Value::StringValue("321".into()));
+        let value = Item::Vec(vec!(
+            Item::Value(Value::StringValue("123".into())),
+            target.clone(),
+        ));
+
+        let _ = state.set("key".into(), value.clone());
+
+        let result = state.get(&key);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), &target)
+    }
+
+    #[test]
+    fn get_array_element_nested_ok() {
+        let mut state = State::new();
+
+        let key: Identifier = "key.0.0".into();
+        let target = Item::Value(Value::StringValue("321".into()));
+        let value = Item::Vec(vec!(
+            Item::Vec(vec!(
+                target.clone(),
+            ))
+        ));
+
+        let _ = state.set("key".into(), value.clone());
+
+        let result = state.get(&key);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), &target)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 #[serde(untagged)]
 pub enum Item {
     Value(Value),
-    Vec(Vec<Value>),
+    Vec(Vec<Item>),
     Map(HashMap<String, Item>),
 }
 
@@ -315,8 +461,8 @@ impl Value {
     pub fn type_name(&self) -> &str {
         match self {
             Value::None => { "None" }
-            Value::IntValue(_) => { "Int"}
-            Value::StringValue(_) => {"String"}
+            Value::IntValue(_) => { "Int" }
+            Value::StringValue(_) => { "String" }
         }
     }
 }
@@ -349,5 +495,11 @@ impl From<String> for Identifier {
 impl From<&str> for Identifier {
     fn from(s: &str) -> Self {
         Identifier(String::from(s))
+    }
+}
+
+impl From<std::num::ParseIntError> for Error {
+    fn from(e: ParseIntError) -> Self {
+        Error::InvalidIndex { reason: e.to_string() }
     }
 }

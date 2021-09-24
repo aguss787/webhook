@@ -164,9 +164,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 impl From<process::Error> for Error {
     fn from(e: process::Error) -> Self {
-        match e {
-            process::Error::NonMapAccess { .. } => { Error::ExecutionError(format!("{}", e)) }
-        }
+        Error::ExecutionError(format!("{}", e))
     }
 }
 
