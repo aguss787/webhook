@@ -1,0 +1,48 @@
+name: test-event
+trigger:
+  - type: google-pubsub
+    config:
+      credential: |
+        {
+          "type": "service_account",
+          "project_id": "123",
+          "private_key_id": "123",
+          "private_key": "-----BEGIN PRIVATE KEY-----\1231321\n-----END PRIVATE KEY-----\n",
+          "client_email": "a@b.iam.gserviceaccount.com",
+          "client_id": "123",
+          "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+          "token_uri": "https://oauth2.googleapis.com/token",
+          "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+          "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/x.iam.gserviceaccount.com"
+        }
+      subscription_id: projects/a-b/subscriptions/test-sub
+
+process:
+  - set_env:
+      target: raw
+      value:
+        from_payload: json
+  - set_env:
+      target: hewan.pet_1
+      value: otter
+  - set_env:
+      target: hewan.pet_2
+      value: hamster
+  - to_payload:
+      format: json
+      value:
+        as_map:
+          key_1: kucing
+          key_2: anjing
+          key_3:
+            - kuda nil
+            - jerapah
+          key_4:
+            get_env: hewan
+          from_payload:
+            get_env: raw
+
+target:
+  - http:
+      - post:
+          url: https://webhook.site/xxx
