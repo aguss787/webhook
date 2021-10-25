@@ -1,7 +1,7 @@
 mod event;
 
-use serde::Deserialize;
 use crate::event::GracefulSignalInvoker;
+use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
 struct Config {
@@ -19,19 +19,20 @@ async fn main() {
 
     log::set_boxed_logger(Box::new(logger)).expect("unable to set logger");
 
-    let log_level = config.webhook_log_level.clone().unwrap_or("warn".to_string());
+    let log_level = config
+        .webhook_log_level
+        .clone()
+        .unwrap_or("warn".to_string());
 
-    log::set_max_level(
-        match log_level.as_str() {
-            "trace" => log::LevelFilter::Trace,
-            "debug" => log::LevelFilter::Debug,
-            "info" => log::LevelFilter::Info,
-            "warn" => log::LevelFilter::Warn,
-            "error" => log::LevelFilter::Error,
-            "off" => log::LevelFilter::Off,
-            _ => log::LevelFilter::Warn,
-        }
-    );
+    log::set_max_level(match log_level.as_str() {
+        "trace" => log::LevelFilter::Trace,
+        "debug" => log::LevelFilter::Debug,
+        "info" => log::LevelFilter::Info,
+        "warn" => log::LevelFilter::Warn,
+        "error" => log::LevelFilter::Error,
+        "off" => log::LevelFilter::Off,
+        _ => log::LevelFilter::Warn,
+    });
 
     log::debug!("config: {:?}", config);
 
@@ -52,9 +53,8 @@ async fn main() {
 
 #[cfg(all(not(windows)))]
 fn handle_signal(g: Box<dyn GracefulSignalInvoker>) {
-    let mut signals = signal_hook::iterator::Signals::new(&[
-        signal_hook::consts::SIGTERM,
-    ]).expect("unable to initialize signal handler");
+    let mut signals = signal_hook::iterator::Signals::new(&[signal_hook::consts::SIGTERM])
+        .expect("unable to initialize signal handler");
 
     tokio::task::spawn_blocking(move || {
         for _ in signals.forever() {
